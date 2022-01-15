@@ -8,11 +8,6 @@ local serialization = require("serialization")
 -- store information containing mined areas
 -- display that information via hologram
 -- send commands for robots to mine
-
-local ports = {
-     -- key -> port, value -> deploy position
-    ["1"] = {X = -332, Y = 62, Z = -223}
-}
 local log = {
     -- key -> os.Time, value -> message
 }
@@ -21,11 +16,13 @@ local data = {
     ["originX"]= 0,
     ["originY"]= 0,
     ["originZ"]= 0,
+    ["radius"] = 16, -- 4 chunks wide and length, radius height
+    ["ports"] = {},
     ["terrainData"] = {},
 }
 local kill = false
-local RADIUS = 16 -- 4 chunks wide and length, radius height
 local filename = "data.txt"
+local miningQueue = 0
 
 local function succ()
     computer.beep("..")
@@ -42,18 +39,36 @@ local function err(message)
     interface()
 end
 
-local function getSignOf(n)
-    if n > 0.1 then
-        return 1
-    elseif n < -0.1 then
-        return -1
-    else
-        return 0
+function sign(number)
+    return (number > 0 and 1) or (number == 0 and 0) or -1
+end
+
+local function simplify(n, s, loops)
+    local gaps = loops -1
+    if s == "COS" then
+        for i = 1, loops do
+            -- if the cos is less than the upper bound of the gaps
+            if n+0.001 < sign(n)*(math.cos(math.rad(45))/i) and n > sign(n)*(math.cos(math.rad(45))/(i+1)) then
+                -- belonging gap found!
+                
+                return sign(n)*(gaps/i)/(loops)
+            end
+        end
+        return math.floor(n+0.5)
+    elseif s == "SIN" then
+        for i = 1, loops do
+            -- if the sin is less than the upper bound of the gaps
+            if n+0.001 < sign(n)*(math.sin(math.rad(45))/i) and n > sign(n)*(math.sin(math.rad(45))/(i+1)) then
+                -- belonging gap found!
+                return sign(n)*(gaps/i)/(loops)
+            end
+        end
+        return math.floor(n+0.5)
     end
 end
 local function portExists(port)
-    for p, _ in pairs(ports) do
-        if tonumber(p) == port then
+    for p, _ in pairs(data["ports"]) do
+        if tonumber(p) == tonumber(port) then
             return true
         end
     end
@@ -70,11 +85,41 @@ function createNetworkThread(port)
         while not kill do     
             -- this component generates a signal named modem_message if a message from another network card is received.
             --It has the signature localAddress: string, remoteAddress: string, port: number, distance: number, ...
-            local _, _, from, port, _, message = event.pull("modem_message")
+            local _, _, from, p, _, message = event.pull("modem_message")
             log[os.time()] = message
+            if miningQueue > 0 and message == "Awaiting" then
+                miningQueue = miningQueue - 1
+                os.sleep(3)
+                deployRobot(port)     
+            end
         end
         modem.close(port)
     end, port)
+end
+
+function addPort()
+    print("\nAdd a new port for robots to deploy from...\n")
+    local p, x, y, z
+    while not p or portExists(p) do
+        print("Add a non-existing port number:")
+        p = tonumber(term.read())
+    end
+    while x == nil do
+        print("Insert the X coordinate where the robot will deploy:")
+        x = tonumber(term.read())
+    end  
+    while y == nil do
+        print("Insert the Y coordinate where the robot will deploy:")
+        y = tonumber(term.read())
+    end
+    while z == nil do
+        print("Insert the Z coordinate where the robot will deploy:")
+        z = tonumber(term.read())
+    end
+    data["ports"][tostring(p)] = {X = x, Y = y, Z = z}
+    createNetworkThread(tonumber(port))
+    print("Port successfully added!")
+    succ()
 end
 function printData()
     term.clear()
@@ -88,10 +133,10 @@ function printData()
     interface()
 end
 function generateData()
-    print("\nCAUTION, all terrain data will be lost, will you want to proceed? Type 1 for yes\n")
+    print("\nYou chose the option to modify data, will you want to proceed? Type 1 for yes\n")
     local input = tonumber(term.read())
     if input == 1 then
-        local oX, oY, oZ
+        local oX, oY, oZ, r = _, _, _, 0
         while oX == nil do
             print("Insert new X origin point: ")
             oX = tonumber(term.read())
@@ -106,6 +151,11 @@ function generateData()
             print("Insert new Z origin point: ")
             oZ = tonumber(term.read())
             data["originZ"] = oZ
+        end
+        while r >= 28 or r <= 4 do
+            print("Insert new Radius (min 4, max 28): ")
+            r = tonumber(term.read())
+            data["radius"] = r
         end
     end
     print("\n Saved new data \n")
@@ -122,11 +172,6 @@ function loadData()
         data = serialization.unserialize(fileData)
     else
         file = io.open(filename, "w")
-        data["angle"] = 0
-        data["originX"] = 0
-        data["originY"] = 0
-        data["originZ"] = 0
-        data["terrainData"] = {}
         file:write(serialization.serialize(data))
         file:close()
     end
@@ -142,10 +187,12 @@ function getData(port)
     local originX = tonumber(data["originX"])
     local originY = tonumber(data["originY"])
     local originZ = tonumber(data["originZ"])
+    local RADIUS = tonumber(data["radius"])
+    local ports = data["ports"]
     local loops = 1 + math.floor(angle / 360 ) 
     -- formula returns coordinates depending on the angle of rotation. Hence forming a blocky spiral since it only increments when loops is incremented
-    local x, z = originX + getSignOf(math.cos(math.rad(angle)))*RADIUS*loops*2, originZ + getSignOf(math.sin(math.rad(angle)))*RADIUS*loops*2
-    angle = angle + 45
+    local x, z = originX + simplify(math.cos(math.rad(angle)), "COS", loops)*RADIUS*loops*2, originZ + simplify(math.sin(math.rad(angle)), "SIN", loops)*RADIUS*loops*2
+    angle = angle + (45/loops)
     
     -- update angle
     data["angle"] = angle
@@ -165,15 +212,29 @@ function displayLog()
     interface()
 end
 
-function deployRobot(port, data)
-    local s_data = serialization.serialize(data)
+function deployRobot(port)
+    local d = getData(tostring(port))
+    local s_data = serialization.serialize(d)
     print("Broadcasting to port ".. port)
     modem.broadcast(port, s_data)
-    local _, _, _, _, _, message = event.pull("modem_message")
-    print("\n"..message.."\n")
+    local message = "Robot of port " .. port .. " deployed to the coordinates: " .. d.targetX .. " X, ".. d.targetY .. " Y, ".. d.targetZ .. " Z"
+    print(message)
+    log[os.time()] = message
     succ()
 end
-
+-- automatically deploy robots
+function addMiningQueue()
+    term.clear()
+    print("The current mining queue is set at: " .. miningQueue)
+    local add
+    while not add do
+        print("Add onto the mining queue: ")
+        add = tonumber(term.read())
+    end
+    miningQueue = miningQueue + add
+    print("The mining queue has changed to: ".. miningQueue)
+    succ()
+end
 function interface()
     -- create interface for user to interact with commands:
     print("(1) Insert new port with coordinates")
@@ -182,10 +243,13 @@ function interface()
     print("(4) Inspect data")
     print("(5) Generate hologram")
     print("(6) Deploy robot")
+    print("(7) Add mining queue")
     print("(0) Kill Server (not recommended)")
     input = tonumber(term.read())
     if input then
-        if input == 2 then -- Open log
+        if input == 1 then
+            addPort()
+        elseif input == 2 then -- Open log
             displayLog()
         elseif input == 3 then
             generateData()
@@ -195,11 +259,12 @@ function interface()
             print("Type in the robot port to deploy.")
             local port = tonumber(term.read())
             if port and portExists(port) then
-                local data = getData(tostring(port))
-                deployRobot(port, data)
+                deployRobot(port)
             else
                 err("Invalid port, returning to main interface...")
             end
+        elseif input == 7 then
+            addMiningQueue()
         else
             -- kill threads
             kill = true
@@ -210,9 +275,8 @@ function interface()
     end 
 end
 
-for port, _ in pairs(ports) do
+loadData()
+for port, _ in pairs(data["ports"]) do
     createNetworkThread(tonumber(port))
 end
-
-loadData()
 interface()

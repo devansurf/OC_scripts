@@ -9,6 +9,7 @@ local modem = component.modem
 local computer = component.computer
 local component_robot_api = component.robot
 local geolyzer = component.geolyzer
+local inventory_controller = component.inventory_controller
 
 -- Sizes of blocks to check at a time
 local REGION_SIZE = 4
@@ -41,7 +42,7 @@ local dir = {
     [3] = sides.south,
     [4] = sides.west
 }
-local facing
+local facing, initFacing
 local port
 -- table: {key-> distance, val-> position =>{X,Y,Z}}
 local oreInfo = {}
@@ -52,8 +53,9 @@ local states = {
     MAP_ORES = "MAP_ORES",
     PATHING = "PATHING",
     RETURN = "RETURN",
+    DEPOSIT = "DEPOSIT",
 }
-local state = states.DEPLOYING
+local state = states.DEPOSIT
 local isMining = true
 function awaitServerCall()
     modem.open(port)
@@ -61,7 +63,7 @@ function awaitServerCall()
     local _, _, _, _, _, message = event.pull("modem_message")
     print("Message from server recieved!")
     local dataTbl = serialization.unserialize(message)
-    modem.broadcast(port, tostring("Port: ".. port .. " deployed to the coordinates: " .. dataTbl.targetX .. "-X, ".. dataTbl.targetY .. "-Y, ".. dataTbl.targetZ .. "-Z, "))
+    os.sleep(3)
     REGION_RADIUS = dataTbl.R
     targetPos.X = dataTbl.targetX
     targetPos.Y = dataTbl.targetY
@@ -77,12 +79,15 @@ end
 function inputs()
     print("what direction is the robot facing? [1] North, [2] East, [3] South, [4] West")
     facing = tonumber(term.read())
+    initFacing = facing
     print("Enter the robots port number to continue...")
     port = tonumber(term.read())
     if port then
         awaitServerCall()
     else
         print("invalid port number, exiting...")
+        term.clear()
+        inputs()
     end
 end
 function setState(_state)
@@ -110,7 +115,6 @@ function generatePath(sortedOreDistance)
         currentY = oreInfo[key].Y 
     end 
     --{ {xPath, zPath, yPath = number}, ... }
-    print("the size of the path table is: " .. #pathTable)
     return pathTable
 end
 function getDirection(path)
@@ -227,9 +231,11 @@ function moveToAndHarvest(path, order)
         moveTo(path, "Z")
         moveTo(path, "X")
 
-    elseif order == "ASCENDING" then
+    elseif order == "RETURN_XZ" then
         moveTo(path, "Z")
         moveTo(path, "X")
+        
+    elseif order == "RETURN_Y" then
         moveTo(path,"Y")
     end
     --harvest the ore
@@ -253,7 +259,6 @@ while isMining do
                     for _, data in ipairs(scanData) do
                         if data.hardness == SCAN_HARDNESS and data.distance ~= 0 then
                             counter = counter + 1
-                            print("compatible ore found!")
                             oreInfo[counter] = {X = data.posX, Z = data.posZ, Y = data.posY}
                         end
                     end
@@ -264,7 +269,6 @@ while isMining do
         -- sort oreInfo by distance
         for key, location in pairs(oreInfo) do table.insert(sortedOreDistance, key) end
         table.sort(sortedOreDistance)
-        print("The soroted ore table size is: " .. #sortedOreDistance)
         paths = generatePath(sortedOreDistance)
         setState(states.PATHING)
 
@@ -275,8 +279,59 @@ while isMining do
         setState(states.RETURN)
 
     elseif state == "RETURN" then
-        local indPath = generateIndividualPath(position.X, position.Z, position.Y, initPos.X, initPos.Z, initPos.Y)
-        moveToAndHarvest(indPath, "ASCENDING")
+        local navigatingHomeXZ = true
+        local navigatingHomeY = true
+        -- safehold protocol to guarentee robot gets home
+        while navigatingHomeXZ do
+            local indPath = generateIndividualPath(position.X, position.Z, position.Y, initPos.X, initPos.Z, initPos.Y)
+            moveToAndHarvest(indPath, "RETURN_XZ")
+            if position.X == initPos.X and position.Z == initPos.Z then
+                navigatingHomeXZ = false
+            end
+        end
+        -- navigating in the Y axis is seperate so that moving up or down is last phase
+        while navigatingHomeY do
+            local indPath = generateIndividualPath(position.X, position.Z, position.Y, initPos.X, initPos.Z, initPos.Y)
+            moveToAndHarvest(indPath, "RETURN_Y")
+            if position.Y == initPos.Y  then
+                navigatingHomeY = false
+            end
+        end
+        -- face the initial direction from when it was deployed
+        while dir[facing] ~= dir[initFacing]  do
+            robot.turnRight()
+            facing = facing + 1
+            if facing > 4 then
+                facing = 1
+            end
+        end
+        setState(states.DEPOSIT)
+
+    elseif state == "DEPOSIT" then
+        -- deposit into any adjacent chests
+        -- numbers 0-5 represents all the sides
+        local robot_slot_num = 1
+        for side = 0, 5 do
+            local containerSize = inventory_controller.getInventorySize(sides.front)
+            local containerSlot = 1
+            if containerSize then
+                while robot_slot_num < robot.inventorySize() do
+                    robot.select(robot_slot_num)
+                    -- loop until non-empty slot is found
+                    while robot.count() == 0 and robot_slot_num < robot.inventorySize() do
+                        robot_slot_num = robot_slot_num + 1
+                        robot.select(robot_slot_num)   
+                    end                
+                    local count = robot.count()
+                    if inventory_controller.dropIntoSlot(sides.front, containerSlot, count) then
+                        -- if successfully dropped into, increment the robot's selected slot
+                        robot_slot_num = robot_slot_num + 1     
+                    end
+                    containerSlot = containerSlot +1           
+                end
+            end
+        end
+        modem.broadcast(port, "Awaiting")
         awaitServerCall()
         setState(states.DEPLOYING)
     end
