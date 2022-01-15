@@ -55,7 +55,7 @@ local states = {
     RETURN = "RETURN",
     DEPOSIT = "DEPOSIT",
 }
-local state = states.DEPOSIT
+local state = states.DEPLOYING
 local isMining = true
 function awaitServerCall()
     modem.open(port)
