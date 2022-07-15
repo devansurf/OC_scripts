@@ -14,7 +14,7 @@ local states = {
     SEARCH_FLOOR = "SEARCH_FLOOR",
     WAIT_FOR_BLOCK = "WAIT_FOR_BLOCK"
 }
-
+ -- CobbleVich time
 function equipAvailableBlock()
     -- assign the target block
     robot.select(1)
