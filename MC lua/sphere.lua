@@ -10,6 +10,14 @@ local computer = component.computer
 local BOTTOM_TO_TOP = 'bottomToTop'
 local TOP_TO_BOTTOM = 'topToBottom'
 
+-- clockwise rotation
+sideMap = {
+    [sides.posx] = 1,
+    [sides.posz] = 2,
+    [sides.negx] = 3,
+    [sides.negz] = 4,
+}
+
 local sorts = {
     [BOTTOM_TO_TOP] = function(c1, c2) 
         return c1['y'] < c2['y']
@@ -190,9 +198,9 @@ function traverseTo(pos, dir, coord, mode)
         deltaZ = pos['z'] - coord['z']
 
         if deltaX > 0 then
-            faceDirection(sides.posx)
+            dir = faceDirection(sides.posx)
         elseif deltaX < 0 then
-            faceDirection(sides.negx)
+            dir = faceDirection(sides.negx)
         end
         deltaX = math.abs(deltaX)
         while deltaX ~= 0 do
@@ -205,9 +213,9 @@ function traverseTo(pos, dir, coord, mode)
         end
 
         if deltaZ > 0 then
-            faceDirection(sides.posz)
+            dir = faceDirection(dir, sides.posz)
         elseif deltaX < 0 then
-            faceDirection(sides.negz)
+            dir = faceDirection(dir, sides.negz)
         end
         deltaZ = math.abs(deltaZ)
         while deltaZ ~= 0 do
@@ -218,18 +226,21 @@ function traverseTo(pos, dir, coord, mode)
                 
             end
         end
-        if deltaY > 0 then
-            faceDirection(sides.posy)
-        elseif deltaY < 0 then
-            faceDirection(sides.negy)
-        end
-        deltaY = math.abs(deltaY)
-        while deltaY ~= 0 do
-            if robot.forward() then
-                deltaY = deltaY - 1
+        
+        while (deltaY ~= 0) do
+            if deltaY > 0 then
+                if robot.down() then
+                    deltaY = deltaY - 1
+                else
+                    -- Y axis interruptions will trigger removal of axis layer of sphere
+                end
+    
             else
-                -- smart geolyzer pathfinding would be nice
-                
+                if robot.up() then
+                    deltaY = deltaY + 1
+                else
+                    -- Y axis interruptions will trigger removal of axis layer of sphere
+                end
             end
         end
 
@@ -238,8 +249,32 @@ function traverseTo(pos, dir, coord, mode)
 
 end
 
-function faceDirection(currentDir)
+function faceDirection(currentDir, newDir)
+    local currentDirIndex = sideMap[currentDir]
+    local newDirIndex = sideMap[newDir]
 
+ 
+    local deltaIndex_1 = currentDirIndex - newDirIndex
+    local deltaIndex_2 = newDirIndex - currentDirIndex
+    
+    -- find shortest rotation 
+    local deltaIndex 
+    if math.abs(deltaIndex_1) > math.abs(deltaIndex_2) then
+        deltaIndex = deltaIndex_2
+    else
+        deltaIndex = deltaIndex_1
+    end 
+    -- negative delta is clockwise turn, positive is counterclock
+    while (deltaIndex ~= 0) do
+        if deltaIndex > 0 then
+            robot.turnLeft()
+            deltaIndex = deltaIndex - 1
+        else
+            robot.turnRight()
+            deltaIndex = deltaIndex + 1
+        end
+    end
+    return newDir
 end
 
 function interrupt()
